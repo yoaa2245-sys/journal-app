@@ -284,10 +284,12 @@ Rules:
 - Remove filler words and verbal tics that carry no meaning: um, uh, like, you know, I mean, kind of, sort of, basically, literally, so yeah, right.
 - Remove false starts, stutters and accidentally repeated words. Fix punctuation, capitalization and run-on sentences. Break the text into paragraphs where the topic shifts.
 - Keep the person's own words, voice, tone, slang and swearing. Do not summarize, shorten ideas, add anything, reorder, or make it sound more formal. Keep it in first person exactly as spoken.
+- Keep every sentence and every detail, including side comments, asides in parentheses, names, numbers and repeated thoughts. Never merge two thoughts into one or drop anything that has meaning. When in doubt, keep it.
+- Never censor or soften anything. Keep swear words, sexual content and slang exactly as said, with no asterisks.
 - Speech to text often mishears names. Use the vocabulary list: when a word or phrase in the transcript sounds like an item on the list, replace it with the list's exact spelling. Leave other names alone unless the mistake is obvious.
 
 Reply with only a JSON object, no other text:
-{"title": "a short 3 to 7 word title in the person's own terms", "text": "the cleaned entry, paragraphs separated by \\n\\n", "mood": 1-5 integer for the person's overall mood (1 very low, 3 neutral, 5 great), "tags": ["1 to 4 short lowercase topic tags"]}`;
+{"text": "the cleaned text, paragraphs separated by \\n\\n"}`;
 
 function cleanUserMsg(raw, typed) {
   const words = vocabList();
@@ -337,9 +339,56 @@ async function askAI(system, user) {
   const data = await res.json();
   return data.choices[0].message.content || '';
 }
+// Models tend to summarize long input, so long entries are cleaned in small pieces,
+// and every piece is checked against the original. A piece that lost words (or got
+// censored) is retried once and otherwise kept exactly as originally said.
+const FILLER = new Set('um uh uhh umm like you know i mean kind of sort basically literally so yeah right okay ok oh ah hmm mm'.split(' '));
+const contentWords = (t) => (String(t).toLowerCase().match(/[a-z0-9']+/g) || []).filter((w) => !FILLER.has(w));
+function keptEnough(orig, cleaned) {
+  if (/\*{2,}/.test(cleaned) && !/\*{2,}/.test(orig)) return false;
+  const left = new Map();
+  for (const w of contentWords(cleaned)) left.set(w, (left.get(w) || 0) + 1);
+  const want = contentWords(orig); let hit = 0;
+  for (const w of want) { const n = left.get(w) || 0; if (n) { hit++; left.set(w, n - 1); } }
+  return !want.length || hit / want.length >= 0.88;
+}
+function splitChunks(text, max = 220) {
+  const out = []; let cur = [];
+  const flush = () => { if (cur.length) { out.push(cur.join(' ')); cur = []; } };
+  for (const para of text.split(/\n\s*\n/)) {
+    for (const sent of para.match(/[^.!?\n]+[.!?]*["')\]]*\s*|\n/g) || []) {
+      const words = sent.trim().split(/\s+/).filter(Boolean);
+      for (let i = 0; i < words.length; i += max) {
+        const piece = words.slice(i, i + max);
+        if (cur.length + piece.length > max) flush();
+        cur.push(...piece);
+      }
+    }
+    flush();
+  }
+  return out.length ? out : [text];
+}
+async function cleanChunk(piece, typed) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const t = String(parseJsonLoose(await askAI(CLEAN_SYSTEM, cleanUserMsg(piece, typed))).text || '').trim();
+      if (t && keptEnough(piece, t)) return { text: t, kept: true };
+    } catch (e) { if (attempt) throw e; }
+  }
+  return { text: piece.trim(), kept: false };
+}
 async function cleanup(raw, typed) {
   if (cfg('cleanup') === 'none' || !raw.trim()) return { title: defaultTitle(raw), text: raw, mood: null, tags: [] };
-  return normClean(parseJsonLoose(await askAI(CLEAN_SYSTEM, cleanUserMsg(raw, typed))), raw);
+  const parts = []; let untouched = 0;
+  for (const piece of splitChunks(raw)) {
+    const r = await cleanChunk(piece, typed);
+    if (!r.kept) untouched++;
+    parts.push(r.text);
+  }
+  const text = parts.join('\n\n');
+  let meta = { title: defaultTitle(text), tags: [], mood: null };
+  try { meta = await autoMeta(text); } catch {}
+  return { ...meta, text, untouched };
 }
 const META_SYSTEM = `You label journal entries. Read the entry and reply with only a JSON object, no other text:
 {"title": "a short 3 to 7 word title in the person's own terms", "mood": 1-5 integer for the person's overall mood (1 very low, 3 neutral, 5 great), "tags": ["1 to 4 short lowercase topic tags"]}`;
@@ -367,6 +416,7 @@ async function processRecord(id) {
       setReviewStatus(cfg('cleanup') === 'none' ? '' : 'Cleaning up...');
       const c = await cleanup(rec.raw || '', rec.source !== 'voice' && rec.source !== 'import-audio');
       Object.assign(rec, c, { cleaned: true, error: '' });
+      if (c.untouched) rec.note = `${c.untouched} part${c.untouched === 1 ? ' was' : 's were'} left exactly as you said ${c.untouched === 1 ? 'it' : 'them'}, because the cleanup tried to cut words.`;
       await putPending(rec);
     }
   } catch (e) {
@@ -868,6 +918,7 @@ function fillReview(r) {
   $('#recleanBtn').textContent = r.source === 'typed' ? 'Tidy up' : 'Re-clean';
   reviewMood = r.mood || null; renderMoodPick();
   const raw = (r.raw || '').length; const txt = (r.text || '').length;
+  if (r.note) setReviewStatus(r.note);
   if (r.cleaned && raw > 200 && txt < raw * 0.55) setReviewStatus('Heads up: the cleanup came out a lot shorter than what you said. Compare it with the raw transcript below.', true);
 }
 async function openReview(id) {
@@ -884,7 +935,7 @@ async function openReview(id) {
   }
   if (!r.cleaned || !r.raw && r.audio) {
     $('#saveEntryBtn').disabled = true;
-    try { r = await processRecord(id); if (reviewId === id) { fillReview(r); setReviewStatus(r.cleaned && $('#reviewStatus').classList.contains('error') ? $('#reviewStatus').textContent : 'Check it over, then save.'); } }
+    try { r = await processRecord(id); if (reviewId === id) { fillReview(r); if (!r.note && !$('#reviewStatus').classList.contains('error')) setReviewStatus('Check it over, then save.'); } }
     catch (e) { if (reviewId === id) { setReviewStatus(e.message, true); $('#retryBtn').hidden = false; } }
     finally { $('#saveEntryBtn').disabled = false; }
   } else if (!$('#reviewStatus').textContent) setReviewStatus('Check it over, then save.');
