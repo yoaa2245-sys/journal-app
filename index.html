@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Voice Journal</title>
+<meta name="theme-color" content="#0f0e13">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Journal">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon-180.png">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<div class="glow" aria-hidden="true"></div>
+
+<div id="lock" class="lock">
+  <form class="lock-box" id="lockForm" autocomplete="off">
+    <div class="lock-icon">&#x1F512;</div>
+    <h1 id="lockTitle">Journal</h1>
+    <p class="hint" id="lockHint">Enter your password</p>
+    <input id="lockPw" type="password" placeholder="Password" autocomplete="current-password" required>
+    <input id="lockPw2" type="password" placeholder="Type it again" autocomplete="new-password" hidden>
+    <button class="primary" type="submit" id="lockSubmit">Unlock</button>
+    <p class="status error" id="lockErr"></p>
+    <button type="button" class="linkish" id="forgotBtn">Forgot password?</button>
+  </form>
+</div>
+
+<header class="top">
+  <button class="icon-btn" id="backBtn" aria-label="Back" hidden>&#x2039;</button>
+  <h1 id="viewTitle">Today</h1>
+  <button class="icon-btn" id="refreshBtn" aria-label="Refresh">&#x21bb;</button>
+</header>
+
+<main>
+  <!-- TODAY / DASHBOARD -->
+  <section id="view-home" class="view">
+    <div id="setupNotice" class="card notice" hidden>
+      <strong>Almost ready.</strong>
+      <p>Add your free Groq key and a GitHub token in <a href="#more">More &rarr; Settings</a>.</p>
+    </div>
+
+    <div class="hero">
+      <div class="hero-top">
+        <div>
+          <div class="date" id="todayDate"></div>
+          <div class="greet" id="greeting">Hey</div>
+        </div>
+        <button class="lock-btn" id="lockBtn" aria-label="Lock">&#x1F512;</button>
+      </div>
+      <div class="recorder" id="recorder">
+        <canvas id="meter" width="600" height="80" aria-hidden="true"></canvas>
+        <div class="timer" id="timer">0:00</div>
+        <div class="rec-controls">
+          <button id="pauseBtn" class="pill" hidden>Pause</button>
+          <button id="recBtn" class="rec" aria-label="Start recording"><span></span></button>
+          <button id="cancelBtn" class="pill" hidden>Discard</button>
+        </div>
+        <p class="hint" id="recHint">Tap to talk. Say whatever's on your mind.</p>
+      </div>
+    </div>
+
+    <div id="pendingWrap" hidden>
+      <h2>Not saved yet</h2>
+      <ul class="list" id="pendingList"></ul>
+    </div>
+
+    <div class="section-head"><h2>Today's habits</h2><a href="#habits">Edit</a></div>
+    <div class="chips" id="todayHabits"><span class="muted">No habits yet. <a href="#habits">Add one</a></span></div>
+
+    <div class="tiles">
+      <div class="tile"><span class="num" id="statMonth">0</span><span class="lbl">days journaled this month</span></div>
+      <div class="tile"><span class="num" id="statTotal">0</span><span class="lbl">total entries</span></div>
+      <div class="tile"><span class="num" id="statMood">-</span><span class="lbl">avg mood, 30 days</span></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h3>Last 16 weeks</h3><span class="muted" id="heatLegend"></span></div>
+      <div class="heatmap" id="heatmap"></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h3>Mood</h3><span class="muted">last 30 entries</span></div>
+      <div id="moodChart" class="mood-chart"><p class="muted">Mood shows up after a few entries.</p></div>
+    </div>
+
+    <div class="card">
+      <div class="card-head"><h3>What you talk about</h3></div>
+      <div class="chips tags" id="tagCloud"><span class="muted">Topics show up after a few entries.</span></div>
+    </div>
+
+    <div class="section-head"><h2>Recent</h2><a href="#journal">See all</a></div>
+    <ul class="list" id="recentList"><li class="empty">No entries yet</li></ul>
+  </section>
+
+  <!-- REVIEW -->
+  <section id="view-review" class="view" hidden>
+    <div class="status" id="reviewStatus"></div>
+    <label class="field"><span>Title</span><input id="reviewTitle" type="text"></label>
+    <div class="mood-pick" id="moodPick" role="radiogroup" aria-label="Mood"></div>
+    <label class="field"><span>Entry</span><textarea id="reviewText" rows="14"></textarea></label>
+    <label class="field"><span>Tags (comma separated)</span><input id="reviewTags" type="text"></label>
+    <details class="raw"><summary>Raw transcript</summary><p id="reviewRaw"></p></details>
+    <div class="row">
+      <button id="saveEntryBtn" class="primary">Save to journal</button>
+      <button id="recleanBtn" class="ghost">Re-clean</button>
+    </div>
+    <div class="row">
+      <button id="retryBtn" class="ghost" hidden>Retry</button>
+      <button id="discardBtn" class="ghost danger">Discard</button>
+    </div>
+  </section>
+
+  <!-- JOURNAL LIST -->
+  <section id="view-journal" class="view" hidden>
+    <input id="searchBox" type="search" placeholder="Filter by title or tag">
+    <div class="row"><a class="ghost btn" href="#import">Import old entries</a></div>
+    <ul class="list" id="allList"><li class="empty">No entries yet</li></ul>
+  </section>
+
+  <!-- READ -->
+  <section id="view-read" class="view" hidden>
+    <article id="readBody" class="entry"></article>
+  </section>
+
+  <!-- IMPORT -->
+  <section id="view-import" class="view" hidden>
+    <div class="card">
+      <h3>Paste an old entry</h3>
+      <p class="hint">Copy a note from the Notes app and paste it here.</p>
+      <label class="field"><span>Date and time it was written</span><input id="impDate" type="datetime-local"></label>
+      <label class="field"><span>Text</span><textarea id="impText" rows="8"></textarea></label>
+      <label class="check"><input id="impClean" type="checkbox" checked> Clean up filler words and fix names</label>
+      <div class="row"><button id="impPasteBtn" class="primary">Import</button></div>
+    </div>
+    <div class="card">
+      <h3>Upload files</h3>
+      <p class="hint">Text files (.txt, .md) or audio (voice memos, .m4a, .mp3). Audio gets transcribed. The date comes from the file name when it has one (like 2025-03-14), otherwise from the file's modified date.</p>
+      <input id="impFiles" type="file" multiple accept=".txt,.md,text/plain,text/markdown,audio/*,.m4a">
+      <label class="check"><input id="impFilesClean" type="checkbox" checked> Clean up text files too</label>
+      <ul class="list" id="impLog"></ul>
+    </div>
+    <p class="hint">Lots of old notes? Put them in the <code>import/</code> folder of your repo and ask Claude Code: "convert everything in import/ into journal entries".</p>
+  </section>
+
+  <!-- HABITS -->
+  <section id="view-habits" class="view" hidden>
+    <form class="card add-habit" id="addHabitForm">
+      <input id="habitEmoji" type="text" maxlength="4" placeholder="&#x1F4A7;" aria-label="Emoji">
+      <input id="habitName" type="text" placeholder="New habit, like Drink water" aria-label="Habit name">
+      <button class="primary" type="submit">Add</button>
+    </form>
+    <div id="habitList"></div>
+  </section>
+
+  <!-- MORE -->
+  <section id="view-more" class="view" hidden>
+    <div class="card">
+      <h3>Words to know</h3>
+      <p class="hint">Names and words the transcriber should spell right, one per line. Whisper listens for them, and the cleanup step fixes near misses (like "Oshur Cone" to "Osher Cohen"). Saved in <code>journal/vocabulary.txt</code>, so every device shares the list.</p>
+      <textarea id="vocabText" rows="8" placeholder="Osher Cohen"></textarea>
+      <div class="row"><button id="saveVocabBtn" class="primary">Save words</button></div>
+      <p class="status" id="vocabStatus"></p>
+    </div>
+
+    <div class="card">
+      <h3>Settings</h3>
+      <p class="hint">Keys stay in this browser only. They are never written to the repo.</p>
+
+      <h4>Transcription (Groq, free)</h4>
+      <label class="field"><span>Groq API key</span><input id="set-groqKey" type="password" autocomplete="off" placeholder="gsk_..."></label>
+      <label class="field"><span>Speech model</span><input id="set-sttModel" type="text" placeholder="whisper-large-v3"></label>
+      <label class="field"><span>Language (blank = auto detect)</span><input id="set-language" type="text" placeholder="en"></label>
+
+      <h4>Cleanup</h4>
+      <label class="field"><span>Clean up with</span>
+        <select id="set-cleanup">
+          <option value="groq">Groq (free)</option>
+          <option value="claude">Claude (paid, best at keeping your voice)</option>
+          <option value="none">No cleanup (raw transcript)</option>
+        </select>
+      </label>
+      <label class="field"><span>Groq chat model</span><input id="set-groqChatModel" type="text" placeholder="openai/gpt-oss-120b"></label>
+      <label class="field"><span>Anthropic API key (only for Claude)</span><input id="set-anthropicKey" type="password" autocomplete="off" placeholder="sk-ant-..."></label>
+      <label class="field"><span>Claude model</span>
+        <select id="set-claudeModel">
+          <option value="claude-opus-5-5">Opus 5.5 (best, a few cents per entry)</option>
+          <option value="claude-sonnet-5-5">Sonnet 5.5</option>
+          <option value="claude-haiku-5-5">Haiku 5.5 (well under a cent)</option>
+        </select>
+      </label>
+
+      <h4>GitHub storage</h4>
+      <label class="field"><span>Repository (owner/name)</span><input id="set-repo" type="text" placeholder="owner/repo" autocapitalize="off" autocorrect="off" spellcheck="false"></label>
+      <label class="field"><span>Branch</span><input id="set-branch" type="text" placeholder="main" autocapitalize="off" spellcheck="false"></label>
+      <label class="field"><span>GitHub token (fine-grained, Contents: read and write)</span><input id="set-ghToken" type="password" autocomplete="off" placeholder="github_pat_..."></label>
+
+      <div class="row">
+        <button id="saveSettingsBtn" class="primary">Save settings</button>
+        <button id="testBtn" class="ghost">Test connection</button>
+      </div>
+      <p class="status" id="settingsStatus"></p>
+    </div>
+
+    <div class="card">
+      <h3>Set up another device</h3>
+      <p class="hint">Copies a link with your settings and keys built in, encrypted with your password. Open it on your other device (AirDrop it or text it to yourself), type your password, and everything fills in.</p>
+      <div class="row"><button id="shareSetupBtn" class="ghost">Copy setup link</button></div>
+    </div>
+
+    <div class="card">
+      <h3>Password</h3>
+      <p class="hint">Your keys and settings on this device are encrypted with it. The app locks itself after 5 minutes in the background.</p>
+      <label class="field"><span>New password</span><input id="newPw" type="password" autocomplete="new-password"></label>
+      <div class="row"><button id="changePwBtn" class="ghost">Change password</button></div>
+    </div>
+  </section>
+</main>
+
+<nav class="tabs">
+  <a href="#home" data-tab="home"><span>&#x25C9;</span>Today</a>
+  <a href="#journal" data-tab="journal"><span>&#x2630;</span>Journal</a>
+  <a href="#habits" data-tab="habits"><span>&#x2713;</span>Habits</a>
+  <a href="#more" data-tab="more"><span>&#x22EF;</span>More</a>
+</nav>
+
+<div id="toast" class="toast" hidden></div>
+<script src="crypto.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
