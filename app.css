@@ -273,3 +273,6 @@ label.btn { position: relative; }
 .entry blockquote { margin: 0 0 1.05em; padding: 2px 0 2px 14px; border-left: 3px solid var(--accent); color: var(--muted); }
 .entry mark { background: var(--accent-soft); color: inherit; padding: 0 3px; border-radius: 4px; }
 .entry code { font-size: 15px; }
+#pasteSetup { display: grid; gap: 10px; margin-top: 18px; padding-top: 18px; border-top: 1px solid var(--line); }
+#pasteSetup[hidden] { display: none; }
+#pasteSetup input { font-size: 15px; }

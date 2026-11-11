@@ -983,6 +983,7 @@ function showLock() {
   $('#lockPw').autocomplete = isCreate ? 'new-password' : 'current-password';
   $('#lockSubmit').textContent = isCreate ? 'Create' : 'Unlock';
   $('#forgotBtn').hidden = lockMode !== 'unlock';
+  $('#pasteSetup').hidden = lockMode !== 'create';
   setTimeout(() => $('#lockPw').focus(), 50);
 }
 async function onLockSubmit(ev) {
@@ -1036,6 +1037,11 @@ function wire() {
     location.reload();
   });
   $('#lockBtn').addEventListener('click', lockNow);
+  $('#useSetupBtn').addEventListener('click', () => {
+    const m = $('#setupLinkInput').value.trim().match(/setup=([\w-]+)/);
+    if (!m) { $('#lockErr').textContent = 'That does not look like a setup link'; return; }
+    setupPayload = m[1]; lockMode = 'import'; $('#lockErr').textContent = ''; showLock();
+  });
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) hiddenAt = Date.now();
     else if (Vault.unlocked() && hiddenAt && Date.now() - hiddenAt > AUTO_LOCK_MS) lockNow();
