@@ -106,6 +106,24 @@ async function getBlob(sha) {
   const r = await gh(`/git/blobs/${sha}`);
   return b64decode(r.content);
 }
+// Write many files in a single commit (used for big imports).
+async function commitFiles(list, message, attempt = 0) {
+  const branch = encodeURIComponent(cfg('branch'));
+  try {
+    const ref = await gh(`/git/ref/heads/${branch}`);
+    const base = ref.object.sha;
+    const parent = await gh(`/git/commits/${base}`);
+    const tree = await gh('/git/trees', { method: 'POST', body: JSON.stringify({
+      base_tree: parent.tree.sha,
+      tree: list.map((f) => ({ path: f.path, mode: '100644', type: 'blob', content: f.text })),
+    }) });
+    const c = await gh('/git/commits', { method: 'POST', body: JSON.stringify({ message, tree: tree.sha, parents: [base] }) });
+    await gh(`/git/refs/heads/${branch}`, { method: 'PATCH', body: JSON.stringify({ sha: c.sha }) });
+  } catch (e) {
+    if (attempt < 2 && (e.status === 409 || e.status === 422)) return commitFiles(list, message, attempt + 1);
+    throw e;
+  }
+}
 
 /* ---------- entry format ---------- */
 function parseEntry(md) {
@@ -221,6 +239,15 @@ function extFor(type, name) {
   if (/wav/.test(type)) return 'wav';
   return 'm4a';
 }
+// Retry politely when a free tier says "slow down".
+async function fetchRetry(url, opts, tries = 4) {
+  for (let i = 0; ; i++) {
+    const res = await fetch(url, opts);
+    if (res.status !== 429 || i >= tries - 1) return res;
+    const wait = Math.min(60, Number(res.headers.get('retry-after')) || 2 ** (i + 2));
+    await new Promise((r) => setTimeout(r, wait * 1000));
+  }
+}
 async function errText(res) {
   try { const j = await res.json(); return (j.error && (j.error.message || j.error)) || JSON.stringify(j); } catch { return res.statusText; }
 }
@@ -234,7 +261,7 @@ async function transcribe(blob, name) {
   if (words.length) fd.append('prompt', `Journal entry. Names and words that may come up: ${words.join(', ')}.`.slice(0, 800));
   fd.append('response_format', 'json');
   fd.append('temperature', '0');
-  const res = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
+  const res = await fetchRetry('https://api.groq.com/openai/v1/audio/transcriptions', {
     method: 'POST', headers: { Authorization: `Bearer ${cfg('groqKey')}` }, body: fd,
   });
   if (!res.ok) throw new Error(`Transcription failed (${res.status}): ${await errText(res)}`);
@@ -283,7 +310,7 @@ async function cleanup(raw, typed) {
     };
     const body = { model, max_tokens: 16000, system: CLEAN_SYSTEM, messages: [{ role: 'user', content: user }], output_config: { effort: 'low' } };
     if (model !== 'claude-haiku-5-5') { headers['anthropic-beta'] = 'server-side-fallback-2026-07-01'; body.fallbacks = 'default'; }
-    const res = await fetch('https://api.anthropic.com/v1/messages', { method: 'POST', headers, body: JSON.stringify(body) });
+    const res = await fetchRetry('https://api.anthropic.com/v1/messages', { method: 'POST', headers, body: JSON.stringify(body) });
     if (!res.ok) throw new Error(`Claude cleanup failed (${res.status}): ${await errText(res)}`);
     const data = await res.json();
     if (data.stop_reason === 'refusal') throw new Error('Claude declined to clean this entry. You can still save the raw text.');
@@ -296,7 +323,7 @@ async function cleanup(raw, typed) {
       messages: [{ role: 'system', content: CLEAN_SYSTEM }, { role: 'user', content: user }],
     };
     if (json) body.response_format = { type: 'json_object' };
-    return fetch('https://api.groq.com/openai/v1/chat/completions', {
+    return fetchRetry('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST', headers: { Authorization: `Bearer ${cfg('groqKey')}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
     });
   };
@@ -322,7 +349,7 @@ async function processRecord(id) {
     }
     if (!rec.cleaned) {
       setReviewStatus(cfg('cleanup') === 'none' ? '' : 'Cleaning up...');
-      const c = await cleanup(rec.raw || '', rec.source === 'import-text');
+      const c = await cleanup(rec.raw || '', rec.source !== 'voice' && rec.source !== 'import-audio');
       Object.assign(rec, c, { cleaned: true, error: '' });
       await putPending(rec);
     }
@@ -631,9 +658,9 @@ async function renderPending() {
   $('#pendingWrap').hidden = !list.length;
   $('#pendingList').innerHTML = list.map((r) => {
     const d = new Date(r.createdAt);
-    const what = r.stage === 'recording' ? 'Recording was interrupted' : r.error ? r.error : r.cleaned ? 'Ready to save' : 'Needs processing';
-    return `<li><button class="item" data-review="${esc(r.id)}"><span class="face">${r.audio ? '\u{1F399}' : '\u{1F4C4}'}</span><span class="body">
-      <span class="t">${esc(r.title || 'Untitled recording')}</span>
+    const what = r.source === 'typed' ? 'Draft' : r.stage === 'recording' ? 'Recording was interrupted' : r.error ? r.error : r.cleaned ? 'Ready to save' : 'Needs processing';
+    return `<li><button class="item" data-review="${esc(r.id)}"><span class="face">${r.audio ? '\u{1F399}' : r.source === 'typed' ? '\u270F\uFE0F' : '\u{1F4C4}'}</span><span class="body">
+      <span class="t">${esc(r.title || (r.source === 'typed' ? defaultTitle(r.text) : 'Untitled recording'))}</span>
       <span class="d">${fmtDate(d)}, ${fmtTime(d)}${r.duration ? ' · ' + fmtDur(r.duration) : ''}</span>
       <span class="${r.error ? 'err' : 'd'}">${esc(what)}</span></span></button></li>`;
   }).join('');
@@ -710,12 +737,43 @@ async function openEntry(path) {
       <div class="meta">${mood >= 1 && mood <= 5 ? `<span>${MOODS[Math.round(mood) - 1]}</span>` : ''}
         <span>${fmtDate(date)}, ${fmtTime(date)}</span>${p.fm.duration ? `<span>· ${esc(p.fm.duration)}</span>` : ''}
         ${tags.map((t) => `<span class="chip">${esc(t)}</span>`).join('')}</div>
-      ${p.body.split(/\n{2,}/).map((para) => `<p>${esc(para).replace(/\n/g, '<br>')}</p>`).join('')}
-      ${p.raw ? `<details class="raw"><summary>Raw transcript</summary><p>${esc(p.raw)}</p></details>` : ''}`;
+      ${renderMd(p.body)}
+      ${p.raw ? `<details class="raw"><summary>Original text</summary><p>${esc(p.raw)}</p></details>` : ''}`;
   } catch (err) { box.innerHTML = `<p class="status error">${esc(err.message)}</p>`; }
 }
 
-let reviewId = null; let reviewMood = null;
+function inlineMd(t) {
+  return t
+    .replace(/`([^`]+)`/g, '<code>$1</code>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[^*])\*([^*\s][^*]*)\*/g, '$1<em>$2</em>')
+    .replace(/==([^=]+)==/g, '<mark>$1</mark>')
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+}
+function renderMd(md) {
+  const out = []; let list = null; let para = [];
+  const flushPara = () => { if (para.length) { out.push(`<p>${para.map(inlineMd).join('<br>')}</p>`); para = []; } };
+  const flushList = () => { if (list) { out.push(`<${list.tag}>${list.items.join('')}</${list.tag}>`); list = null; } };
+  for (const line of esc(md).split('\n')) {
+    let m;
+    if (!line.trim()) { flushPara(); flushList(); continue; }
+    if ((m = line.match(/^#{1,6}\s+(.*)/))) { flushPara(); flushList(); out.push(`<h3>${inlineMd(m[1])}</h3>`); continue; }
+    if ((m = line.match(/^&gt;\s?(.*)/))) { flushPara(); flushList(); out.push(`<blockquote>${inlineMd(m[1])}</blockquote>`); continue; }
+    if ((m = line.match(/^\s*([-*+]|\d+[.)])\s+(.*)/))) {
+      flushPara();
+      const tag = /\d/.test(m[1]) ? 'ol' : 'ul';
+      if (!list || list.tag !== tag) { flushList(); list = { tag, items: [] }; }
+      const task = m[2].match(/^\[([ xX])\]\s+(.*)/);
+      list.items.push(task ? `<li class="task">${task[1] === ' ' ? '\u2610' : '\u2611'} ${inlineMd(task[2])}</li>` : `<li>${inlineMd(m[2])}</li>`);
+      continue;
+    }
+    flushList(); para.push(line);
+  }
+  flushPara(); flushList();
+  return out.join('');
+}
+
+let reviewId = null; let reviewMood = null; let draftTimer = null;
 function renderMoodPick() {
   $('#moodPick').innerHTML = MOODS.map((m, i) => `<button type="button" role="radio" aria-checked="${reviewMood === i + 1}" class="${reviewMood === i + 1 ? 'on' : ''}" data-mood="${i + 1}">${m}</button>`).join('');
 }
@@ -724,6 +782,8 @@ function fillReview(r) {
   $('#reviewText').value = r.text || r.raw || '';
   $('#reviewTags').value = (r.tags || []).join(', ');
   $('#reviewRaw').textContent = r.raw || '(not transcribed yet)';
+  $('#reviewRawWrap').hidden = r.source === 'typed' && !r.raw;
+  $('#recleanBtn').textContent = r.source === 'typed' ? 'Tidy up' : 'Re-clean';
   reviewMood = r.mood || null; renderMoodPick();
   const raw = (r.raw || '').length; const txt = (r.text || '').length;
   if (r.cleaned && raw > 200 && txt < raw * 0.55) setReviewStatus('Heads up: the cleanup came out a lot shorter than what you said. Compare it with the raw transcript below.', true);
@@ -734,6 +794,12 @@ async function openReview(id) {
   if (!r) { setReviewStatus('This entry was already saved or discarded.'); return; }
   fillReview(r);
   if (r.stage === 'recording') { r.stage = 'recorded'; await putPending(r); }
+  if (r.source === 'typed' && r.cleaned) {
+    $('#viewTitle').textContent = 'Write';
+    setReviewStatus('Write whatever you want. Drafts save on this device as you type. "Tidy up" fixes typos and adds a mood and tags.');
+    if (!r.text) setTimeout(() => $('#reviewText').focus(), 50);
+    return;
+  }
   if (!r.cleaned || !r.raw && r.audio) {
     $('#saveEntryBtn').disabled = true;
     try { r = await processRecord(id); if (reviewId === id) { fillReview(r); setReviewStatus(r.cleaned && $('#reviewStatus').classList.contains('error') ? $('#reviewStatus').textContent : 'Check it over, then save.'); } }
@@ -786,6 +852,92 @@ async function importFiles(files) {
     }
   }
   renderDashboard(); renderPending();
+}
+
+/* ---------- Obsidian import ---------- */
+function parseYamlLite(src) {
+  const out = {}; let key = null;
+  for (const line of src.split('\n')) {
+    let m;
+    if ((m = line.match(/^\s+-\s*(.*)$/)) && key) { (out[key] = Array.isArray(out[key]) ? out[key] : []).push(m[1].replace(/^["']|["']$/g, '')); continue; }
+    if ((m = line.match(/^([^:#\s][^:]*):\s*(.*)$/))) {
+      key = m[1].trim().toLowerCase(); let v = m[2].trim();
+      if (/^\[.*\]$/.test(v)) v = v.slice(1, -1).split(',').map((x) => x.trim().replace(/^["']|["']$/g, '')).filter(Boolean);
+      else v = v.replace(/^["']|["']$/g, '');
+      out[key] = v === '' ? [] : v;
+    }
+  }
+  return out;
+}
+function dateFromText(str) {
+  const m = String(str || '').match(/(\d{4})-(\d{2})-(\d{2})(?:[T ](\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+  if (!m) return null;
+  const d = new Date(+m[1], +m[2] - 1, +m[3], +(m[4] || 12), +(m[5] || 0), +(m[6] || 0));
+  return isNaN(d) ? null : d;
+}
+function parseObsidian(text, file) {
+  let body = text.replace(/\r\n/g, '\n'); let fm = {};
+  const m = body.match(/^---\n([\s\S]*?)\n---\n?/);
+  if (m) { fm = parseYamlLite(m[1]); body = body.slice(m[0].length); }
+  const rel = file.webkitRelativePath || file.name;
+  const base = file.name.replace(/\.(md|markdown|txt)$/i, '');
+  const fmDate = ['date', 'created', 'date created', 'created_at', 'creation date', 'day'].map((k) => fm[k]).find((v) => v && !Array.isArray(v));
+  const date = dateFromText(fmDate) || dateFromText(base) || dateFromText(rel) || new Date(file.lastModified || Date.now());
+  let tags = [].concat(fm.tags || fm.tag || []).flatMap((t) => String(t).split(/[,\s]+/));
+  body.replace(/(^|\s)#([A-Za-z][\w/-]*)/g, (_, a, t) => { tags.push(t); return _; });
+  tags = [...new Set(tags.map((t) => t.replace(/^#/, '').toLowerCase().trim()).filter(Boolean))].slice(0, 6);
+  body = body
+    .replace(/!\[\[([^\]]+)\]\]/g, (_, f) => `(attachment: ${f.split('|')[0]})`)
+    .replace(/\[\[([^\]|#]+)(?:#[^\]|]*)?\|([^\]]+)\]\]/g, '$2')
+    .replace(/\[\[([^\]|#]+)(?:#[^\]]*)?\]\]/g, '$1')
+    .replace(/%%[\s\S]*?%%/g, '')
+    .trim();
+  const dateLike = /^\d{4}-\d{2}-\d{2}/.test(base) || /^untitled/i.test(base);
+  let title = fm.title && !Array.isArray(fm.title) ? fm.title : (dateLike ? '' : base);
+  if (!title) { const h = body.match(/^#{1,3}\s+(.+)$/m); title = h ? h[1].trim() : defaultTitle(body.replace(/[#>*_`-]/g, ' ')); }
+  const top = body.match(/^#\s+(.+)\n*/);
+  if (top && top[1].trim().toLowerCase() === String(title).trim().toLowerCase()) body = body.slice(top[0].length).trim();
+  return { date, title, tags, text: body, dateLike: !fm.title && dateLike };
+}
+const SKIP_DIR = /(^|\/)(\.[^/]*|templates?|_templates?|attachments?)\//i;
+async function importObsidian(files) {
+  if (!configured()) { toast('Finish setup in More first'); return; }
+  const st = $('#obsStatus'); const log = $('#obsLog'); log.innerHTML = '';
+  const notes = files.filter((f) => /\.(md|markdown|txt)$/i.test(f.name) && !SKIP_DIR.test(f.webkitRelativePath || ''));
+  if (!notes.length) { st.textContent = 'No notes found. Pick .md files or your vault folder.'; return; }
+  const useAI = $('#obsAI').checked && cfg('cleanup') !== 'none';
+  const existing = new Set(entries.map((e) => e.path));
+  const ready = []; let skipped = 0; let failed = 0;
+  for (let i = 0; i < notes.length; i++) {
+    const f = notes[i];
+    st.textContent = `Reading ${i + 1} of ${notes.length}...`;
+    try {
+      const n = parseObsidian(await f.text(), f);
+      if (!n.text.trim()) { skipped++; continue; }
+      let mood = null;
+      if (useAI) {
+        st.textContent = `Adding mood and tags ${i + 1} of ${notes.length}...`;
+        try {
+          const c = await cleanup(n.text, true);
+          mood = c.mood; n.tags = [...new Set([...n.tags, ...c.tags])].slice(0, 6);
+          if (n.dateLike && c.title) n.title = c.title;
+        } catch (e) { log.insertAdjacentHTML('beforeend', `<li class="log-item">${esc(f.name)}: imported without mood (${esc(e.message)})</li>`); }
+      }
+      const path = entryPath(n.date, n.title);
+      if (existing.has(path)) { skipped++; continue; }
+      existing.add(path);
+      ready.push({ path, text: buildEntry({ date: n.date, title: n.title, text: n.text, raw: '', mood, tags: n.tags, source: 'obsidian' }) });
+    } catch (e) { failed++; log.insertAdjacentHTML('beforeend', `<li class="log-item danger">\u2717 ${esc(f.name)}: ${esc(e.message)}</li>`); }
+  }
+  try {
+    for (let i = 0; i < ready.length; i += 100) {
+      st.textContent = `Saving ${Math.min(i + 100, ready.length)} of ${ready.length} to GitHub...`;
+      await commitFiles(ready.slice(i, i + 100), `Import ${ready.slice(i, i + 100).length} notes from Obsidian`);
+    }
+    st.textContent = `Imported ${ready.length} note${ready.length === 1 ? '' : 's'}.${skipped ? ` Skipped ${skipped} (empty or already imported).` : ''}${failed ? ` ${failed} failed.` : ''}`;
+    st.classList.remove('error');
+    loadAll();
+  } catch (e) { st.textContent = `Saving failed: ${e.message}`; st.classList.add('error'); }
 }
 
 /* ---------- settings ---------- */
@@ -920,7 +1072,7 @@ function wire() {
   });
 
   $('#saveEntryBtn').addEventListener('click', async () => {
-    const btn = $('#saveEntryBtn'); btn.disabled = true; setReviewStatus('Saving...');
+    const btn = $('#saveEntryBtn'); btn.disabled = true; setReviewStatus('Saving...'); clearTimeout(draftTimer);
     try {
       const r = await reviewFormToRecord(); await putPending(r);
       await saveRecordAsEntry(r);
@@ -929,12 +1081,30 @@ function wire() {
     finally { btn.disabled = false; }
   });
   $('#recleanBtn').addEventListener('click', async () => {
-    const r = await getPending(reviewId); if (!r || !r.raw) return;
+    let r = await getPending(reviewId); if (!r) return;
+    if (r.source === 'typed') {
+      r = await reviewFormToRecord();
+      if (!r.text.trim()) { toast('Write something first'); return; }
+      r.raw = r.text;
+    }
+    if (!r.raw) return;
     r.cleaned = false; await putPending(r); openReview(reviewId);
+  });
+  const saveDraftSoon = () => {
+    clearTimeout(draftTimer);
+    draftTimer = setTimeout(async () => { if (!reviewId) return; try { await putPending(await reviewFormToRecord()); } catch {} }, 700);
+  };
+  ['#reviewText', '#reviewTitle', '#reviewTags'].forEach((sel) => $(sel).addEventListener('input', saveDraftSoon));
+  $('#writeBtn').addEventListener('click', async () => {
+    if (!configured()) { toast('Finish setup in More first'); location.hash = '#more'; return; }
+    const r = { id: newId(), createdAt: localISO(new Date()), source: 'typed', raw: '', text: '', title: '', tags: [], mood: null, cleaned: true };
+    await putPending(r);
+    location.hash = `#review/${r.id}`;
   });
   $('#retryBtn').addEventListener('click', () => openReview(reviewId));
   $('#discardBtn').addEventListener('click', async () => {
-    if (!confirm('Discard this entry? The recording is deleted.')) return;
+    if (!confirm('Discard this entry? It is deleted from this device.')) return;
+    clearTimeout(draftTimer);
     await IDB.del(reviewId); reviewId = null; location.hash = '#home';
   });
 
@@ -949,6 +1119,7 @@ function wire() {
     $('#impText').value = '';
     location.hash = `#review/${r.id}`;
   });
+  ['#obsFolder', '#obsFiles'].forEach((sel) => $(sel).addEventListener('change', (ev) => { const files = [...ev.target.files]; ev.target.value = ''; importObsidian(files); }));
   $('#impFiles').addEventListener('change', (ev) => { const files = [...ev.target.files]; ev.target.value = ''; importFiles(files); });
 
   $('#saveVocabBtn').addEventListener('click', async () => {

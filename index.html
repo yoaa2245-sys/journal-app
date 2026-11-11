@@ -61,6 +61,7 @@
           <button id="cancelBtn" class="pill" hidden>Discard</button>
         </div>
         <p class="hint" id="recHint">Tap to talk. Say whatever's on your mind.</p>
+        <button id="writeBtn" class="pill write-pill">&#x270F;&#xFE0F; Write instead</button>
       </div>
     </div>
 
@@ -104,7 +105,7 @@
     <div class="mood-pick" id="moodPick" role="radiogroup" aria-label="Mood"></div>
     <label class="field"><span>Entry</span><textarea id="reviewText" rows="14"></textarea></label>
     <label class="field"><span>Tags (comma separated)</span><input id="reviewTags" type="text"></label>
-    <details class="raw"><summary>Raw transcript</summary><p id="reviewRaw"></p></details>
+    <details class="raw" id="reviewRawWrap"><summary>Original text</summary><p id="reviewRaw"></p></details>
     <div class="row">
       <button id="saveEntryBtn" class="primary">Save to journal</button>
       <button id="recleanBtn" class="ghost">Re-clean</button>
@@ -143,6 +144,17 @@
       <input id="impFiles" type="file" multiple accept=".txt,.md,text/plain,text/markdown,audio/*,.m4a">
       <label class="check"><input id="impFilesClean" type="checkbox" checked> Clean up text files too</label>
       <ul class="list" id="impLog"></ul>
+    </div>
+    <div class="card">
+      <h3>Import from Obsidian</h3>
+      <p class="hint">On a computer, pick your whole vault folder. On a phone, select notes from the Files app. Your text stays exactly as you wrote it. Dates come from a <code>date</code> or <code>created</code> property, a date in the file name (daily notes), or the file's modified date. Tags and [[links]] are kept. Importing the same notes twice skips the ones already there.</p>
+      <div class="row">
+        <label class="ghost btn">Choose vault folder<input id="obsFolder" type="file" webkitdirectory multiple hidden></label>
+        <label class="ghost btn">Choose notes<input id="obsFiles" type="file" multiple accept=".md,.markdown,.txt,text/markdown,text/plain" hidden></label>
+      </div>
+      <label class="check"><input id="obsAI" type="checkbox"> Add mood and tags with AI (slower, text is not changed)</label>
+      <p class="status" id="obsStatus"></p>
+      <ul class="list" id="obsLog"></ul>
     </div>
     <p class="hint">Lots of old notes? Put them in the <code>import/</code> folder of your repo and ask Claude Code: "convert everything in import/ into journal entries".</p>
   </section>
