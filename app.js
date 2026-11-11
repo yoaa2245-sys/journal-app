@@ -67,6 +67,7 @@ async function pool(items, n, fn) {
 
 /* ---------- GitHub storage ---------- */
 async function gh(path, opts = {}) {
+  if (!cfg('repo') || !cfg('ghToken')) throw new Error('Add your repo and GitHub token in More.');
   const url = path.startsWith('http') ? path : `https://api.github.com/repos/${cfg('repo')}${path}`;
   const res = await fetch(url, {
     cache: 'no-store',
@@ -801,6 +802,8 @@ async function testConnection() {
   const out = []; const st = $('#settingsStatus'); st.classList.remove('error'); st.textContent = 'Testing...';
   let bad = false;
   try {
+    if (!/^[\w.-]+\/[\w.-]+$/.test(cfg('repo'))) throw new Error('type your repo as owner/name, for example yoaa2245-sys/fictional-dollop');
+    if (!cfg('ghToken')) throw new Error('paste your GitHub token');
     const r = await gh(`https://api.github.com/repos/${cfg('repo')}`);
     out.push(r.permissions && r.permissions.push ? `GitHub: OK (${r.private ? 'private' : 'PUBLIC, your journals would be visible!'})` : 'GitHub: token can read but not write. Give it Contents: Read and write.');
     if (!r.private || !(r.permissions && r.permissions.push)) bad = true;
