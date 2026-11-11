@@ -133,6 +133,20 @@
     <article id="readBody" class="entry"></article>
   </section>
 
+  <!-- EDIT -->
+  <section id="view-edit" class="view" hidden>
+    <p class="status" id="editStatus"></p>
+    <label class="field"><span>Title</span><input id="editTitle" type="text"></label>
+    <div class="mood-pick" id="editMood" role="radiogroup" aria-label="Mood"></div>
+    <label class="field"><span>Entry</span><textarea id="editText" rows="16"></textarea></label>
+    <label class="field"><span>Tags (comma separated)</span><input id="editTags" type="text"></label>
+    <div class="row">
+      <button id="saveEditBtn" class="primary">Save changes</button>
+      <button id="cancelEditBtn" class="ghost">Cancel</button>
+    </div>
+    <div class="row"><button id="deleteEntryBtn" class="ghost danger">Delete entry</button></div>
+  </section>
+
   <!-- IMPORT -->
   <section id="view-import" class="view" hidden>
     <div class="card">

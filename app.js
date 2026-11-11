@@ -297,31 +297,25 @@ function normClean(j, raw) {
     tags: Array.isArray(j.tags) ? j.tags.map((t) => String(t).toLowerCase().trim()).filter(Boolean).slice(0, 4) : [],
   };
 }
-async function cleanup(raw, typed) {
-  const mode = cfg('cleanup');
-  if (mode === 'none' || !raw.trim()) return { title: defaultTitle(raw), text: raw, mood: null, tags: [] };
-  const user = cleanUserMsg(raw, typed);
-  if (mode === 'claude') {
+// Sends one prompt to the chosen cleanup provider and returns the reply text.
+async function askAI(system, user) {
+  if (cfg('cleanup') === 'claude') {
     if (!cfg('anthropicKey')) throw new Error('Add an Anthropic API key in More, or switch cleanup to Groq.');
     const model = cfg('claudeModel');
     const headers = {
       'x-api-key': cfg('anthropicKey'), 'anthropic-version': '2023-06-01',
       'anthropic-dangerous-direct-browser-access': 'true', 'content-type': 'application/json',
     };
-    const body = { model, max_tokens: 16000, system: CLEAN_SYSTEM, messages: [{ role: 'user', content: user }], output_config: { effort: 'low' } };
+    const body = { model, max_tokens: 16000, system, messages: [{ role: 'user', content: user }], output_config: { effort: 'low' } };
     if (model !== 'claude-haiku-5-5') { headers['anthropic-beta'] = 'server-side-fallback-2026-07-01'; body.fallbacks = 'default'; }
     const res = await fetchRetry('https://api.anthropic.com/v1/messages', { method: 'POST', headers, body: JSON.stringify(body) });
-    if (!res.ok) throw new Error(`Claude cleanup failed (${res.status}): ${await errText(res)}`);
+    if (!res.ok) throw new Error(`Claude failed (${res.status}): ${await errText(res)}`);
     const data = await res.json();
-    if (data.stop_reason === 'refusal') throw new Error('Claude declined to clean this entry. You can still save the raw text.');
-    const text = (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
-    return normClean(parseJsonLoose(text), raw);
+    if (data.stop_reason === 'refusal') throw new Error('Claude declined this entry. You can still save it as is.');
+    return (data.content || []).filter((b) => b.type === 'text').map((b) => b.text).join('');
   }
   const call = async (json) => {
-    const body = {
-      model: cfg('groqChatModel'), temperature: 0.2,
-      messages: [{ role: 'system', content: CLEAN_SYSTEM }, { role: 'user', content: user }],
-    };
+    const body = { model: cfg('groqChatModel'), temperature: 0.2, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] };
     if (json) body.response_format = { type: 'json_object' };
     return fetchRetry('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST', headers: { Authorization: `Bearer ${cfg('groqKey')}`, 'Content-Type': 'application/json' }, body: JSON.stringify(body),
@@ -331,7 +325,19 @@ async function cleanup(raw, typed) {
   if (res.status === 400) res = await call(false);
   if (!res.ok) throw new Error(`Cleanup failed (${res.status}): ${await errText(res)}`);
   const data = await res.json();
-  return normClean(parseJsonLoose(data.choices[0].message.content || ''), raw);
+  return data.choices[0].message.content || '';
+}
+async function cleanup(raw, typed) {
+  if (cfg('cleanup') === 'none' || !raw.trim()) return { title: defaultTitle(raw), text: raw, mood: null, tags: [] };
+  return normClean(parseJsonLoose(await askAI(CLEAN_SYSTEM, cleanUserMsg(raw, typed))), raw);
+}
+const META_SYSTEM = `You label journal entries. Read the entry and reply with only a JSON object, no other text:
+{"title": "a short 3 to 7 word title in the person's own terms", "mood": 1-5 integer for the person's overall mood (1 very low, 3 neutral, 5 great), "tags": ["1 to 4 short lowercase topic tags"]}`;
+// Picks a title, tags and mood without touching the text.
+async function autoMeta(text) {
+  const j = parseJsonLoose(await askAI(META_SYSTEM, `Entry:\n<<<\n${text}\n>>>`));
+  const n = normClean({ ...j, text }, text);
+  return { title: n.title, tags: n.tags, mood: n.mood };
 }
 function defaultTitle(text) {
   const w = String(text || '').replace(/\s+/g, ' ').trim().split(' ').slice(0, 6).join(' ');
@@ -702,8 +708,8 @@ async function loadAll() {
 }
 
 /* ---------- views ---------- */
-const TITLES = { home: 'Today', journal: 'Journal', read: '', review: 'New entry', import: 'Import', habits: 'Habits', more: 'More' };
-const TAB_OF = { home: 'home', journal: 'journal', read: 'journal', import: 'journal', review: 'home', habits: 'habits', more: 'more' };
+const TITLES = { home: 'Today', journal: 'Journal', read: '', edit: 'Edit entry', review: 'New entry', import: 'Import', habits: 'Habits', more: 'More' };
+const TAB_OF = { home: 'home', journal: 'journal', read: 'journal', edit: 'journal', import: 'journal', review: 'home', habits: 'habits', more: 'more' };
 async function route() {
   if (!Vault.unlocked()) return;
   const [name, ...rest] = (location.hash.slice(1) || 'home').split('/');
@@ -712,12 +718,13 @@ async function route() {
   document.querySelectorAll('.view').forEach((v) => { v.hidden = v.id !== `view-${view}`; });
   document.querySelectorAll('.tabs a').forEach((a) => a.classList.toggle('active', a.dataset.tab === TAB_OF[view]));
   $('#viewTitle').textContent = TITLES[view];
-  $('#backBtn').hidden = !['read', 'review', 'import'].includes(view);
+  $('#backBtn').hidden = !['read', 'edit', 'review', 'import'].includes(view);
   window.scrollTo(0, 0);
   if (view === 'home') { renderDashboard(); renderPending(); }
   if (view === 'journal') renderJournal();
   if (view === 'habits') renderHabits();
   if (view === 'read') openEntry(arg);
+  if (view === 'edit') openEdit(arg);
   if (view === 'review') openReview(arg);
   if (view === 'import' && !$('#impDate').value) $('#impDate').value = localISO(new Date()).slice(0, 16);
 }
@@ -736,7 +743,8 @@ async function openEntry(path) {
     box.innerHTML = `<h1>${esc(p.title || 'Untitled')}</h1>
       <div class="meta">${mood >= 1 && mood <= 5 ? `<span>${MOODS[Math.round(mood) - 1]}</span>` : ''}
         <span>${fmtDate(date)}, ${fmtTime(date)}</span>${p.fm.duration ? `<span>· ${esc(p.fm.duration)}</span>` : ''}
-        ${tags.map((t) => `<span class="chip">${esc(t)}</span>`).join('')}</div>
+        ${tags.map((t) => `<span class="chip">${esc(t)}</span>`).join('')}
+        <a class="chip edit-link" href="#edit/${encodeURIComponent(path)}">Edit</a></div>
       ${renderMd(p.body)}
       ${p.raw ? `<details class="raw"><summary>Original text</summary><p>${esc(p.raw)}</p></details>` : ''}`;
   } catch (err) { box.innerHTML = `<p class="status error">${esc(err.message)}</p>`; }
@@ -773,10 +781,74 @@ function renderMd(md) {
   return out.join('');
 }
 
-let reviewId = null; let reviewMood = null; let draftTimer = null;
-function renderMoodPick() {
-  $('#moodPick').innerHTML = MOODS.map((m, i) => `<button type="button" role="radio" aria-checked="${reviewMood === i + 1}" class="${reviewMood === i + 1 ? 'on' : ''}" data-mood="${i + 1}">${m}</button>`).join('');
+let editState = { path: null, sha: null, md: '', mood: null };
+async function openEdit(path) {
+  const st = $('#editStatus'); st.textContent = 'Loading...'; st.classList.remove('error');
+  $('#saveEditBtn').disabled = true;
+  try {
+    const e = entries.find((x) => x.path === path);
+    const f = e ? { text: await getBlob(e.sha), sha: e.sha } : await getFile(path);
+    if (!f) throw new Error('This entry no longer exists.');
+    const p = parseEntry(f.text);
+    const mood = Math.round(Number(p.fm.mood));
+    editState = { path, sha: f.sha, md: f.text, mood: mood >= 1 && mood <= 5 ? mood : null };
+    $('#editTitle').value = p.title || '';
+    $('#editText').value = p.body;
+    $('#editTags').value = (Array.isArray(p.fm.tags) ? p.fm.tags : []).join(', ');
+    $('#editMood').innerHTML = moodButtons(editState.mood, 'edit');
+    st.textContent = '';
+    $('#saveEditBtn').disabled = false;
+  } catch (err) { st.textContent = err.message; st.classList.add('error'); }
 }
+function rebuildEntry(md, { title, text, mood, tags }) {
+  const p = parseEntry(md);
+  const lines = ['---', `date: ${p.fm.date || localISO(new Date())}`, `title: ${JSON.stringify(title)}`];
+  if (mood) lines.push(`mood: ${mood}`);
+  if (tags.length) lines.push(`tags: ${JSON.stringify(tags)}`);
+  const rest = { ...p.fm, words: text.split(/\s+/).filter(Boolean).length };
+  for (const [k, v] of Object.entries(rest)) {
+    if (['date', 'title', 'mood', 'tags'].includes(k)) continue;
+    lines.push(`${k}: ${typeof v === 'string' && /^[\w.-]+$/.test(v) ? v : JSON.stringify(v)}`);
+  }
+  lines.push('---', '', `# ${title}`, '', text.trim(), '');
+  if (p.raw && p.raw.trim() !== text.trim()) lines.push('<details>', '<summary>Raw transcript</summary>', '', p.raw.trim(), '', '</details>', '');
+  return lines.join('\n');
+}
+async function saveEdit() {
+  const st = $('#editStatus'); const btn = $('#saveEditBtn');
+  const text = $('#editText').value;
+  if (!text.trim()) { st.textContent = 'The entry is empty. Use Delete entry if you want to remove it.'; st.classList.add('error'); return; }
+  btn.disabled = true; st.classList.remove('error'); st.textContent = 'Saving...';
+  try {
+    const title = $('#editTitle').value.trim() || defaultTitle(text);
+    const tags = $('#editTags').value.split(',').map((t) => t.trim().toLowerCase()).filter(Boolean);
+    const md = rebuildEntry(editState.md, { title, text, mood: editState.mood, tags });
+    const sha = await putFile(editState.path, md, 'Edit journal entry', editState.sha);
+    vault.meta[sha] = metaFrom(md); saveVaultSoon();
+    const e = entries.find((x) => x.path === editState.path); if (e) e.sha = sha;
+    toast('Changes saved');
+    location.replace(`#read/${encodeURIComponent(editState.path)}`);
+  } catch (err) {
+    st.textContent = err.status === 409 ? 'This entry was changed somewhere else. Go back, tap refresh, and edit again.' : err.message;
+    st.classList.add('error');
+  } finally { btn.disabled = false; }
+}
+async function deleteEntry() {
+  if (!confirm('Delete this entry for good? This cannot be undone from the app.')) return;
+  const st = $('#editStatus'); st.textContent = 'Deleting...'; st.classList.remove('error');
+  try {
+    await gh(`/contents/${encPath(editState.path)}`, { method: 'DELETE', body: JSON.stringify({ message: 'Delete journal entry', sha: editState.sha, branch: cfg('branch') }) });
+    entries = entries.filter((x) => x.path !== editState.path);
+    toast('Entry deleted');
+    location.replace('#journal');
+  } catch (err) { st.textContent = err.message; st.classList.add('error'); }
+}
+
+let reviewId = null; let reviewMood = null; let draftTimer = null;
+function moodButtons(val, scope) {
+  return MOODS.map((m, i) => `<button type="button" role="radio" aria-checked="${val === i + 1}" class="${val === i + 1 ? 'on' : ''}" data-mood="${i + 1}" data-scope="${scope}">${m}</button>`).join('');
+}
+function renderMoodPick() { $('#moodPick').innerHTML = moodButtons(reviewMood, 'review'); }
 function fillReview(r) {
   $('#reviewTitle').value = r.title || '';
   $('#reviewText').value = r.text || r.raw || '';
@@ -796,7 +868,7 @@ async function openReview(id) {
   if (r.stage === 'recording') { r.stage = 'recorded'; await putPending(r); }
   if (r.source === 'typed' && r.cleaned) {
     $('#viewTitle').textContent = 'Write';
-    setReviewStatus('Write whatever you want. Drafts save on this device as you type. "Tidy up" fixes typos and adds a mood and tags.');
+    setReviewStatus('Write whatever you want. Drafts save on this device as you type. A title, tags and mood are picked for you when you save (anything you fill in yourself is kept). "Tidy up" also fixes typos.');
     if (!r.text) setTimeout(() => $('#reviewText').focus(), 50);
     return;
   }
@@ -1066,7 +1138,11 @@ function wire() {
       const h = habits.data.habits.find((x) => x.id === t.dataset.delHabit);
       if (h && confirm(`Delete "${h.name}"? Its history is removed from the list.`)) habitOp({ t: 'del', id: h.id });
     }
-    if (t.dataset.mood) { const m = +t.dataset.mood; reviewMood = reviewMood === m ? null : m; renderMoodPick(); }
+    if (t.dataset.mood) {
+      const m = +t.dataset.mood;
+      if (t.dataset.scope === 'edit') { editState.mood = editState.mood === m ? null : m; $('#editMood').innerHTML = moodButtons(editState.mood, 'edit'); }
+      else { reviewMood = reviewMood === m ? null : m; renderMoodPick(); }
+    }
   });
 
   $('#addHabitForm').addEventListener('submit', (ev) => {
@@ -1080,7 +1156,17 @@ function wire() {
   $('#saveEntryBtn').addEventListener('click', async () => {
     const btn = $('#saveEntryBtn'); btn.disabled = true; setReviewStatus('Saving...'); clearTimeout(draftTimer);
     try {
-      const r = await reviewFormToRecord(); await putPending(r);
+      const r = await reviewFormToRecord();
+      if (r.source === 'typed' && (r.text || '').trim() && cfg('cleanup') !== 'none' && (!r.title || !(r.tags || []).length || !r.mood)) {
+        setReviewStatus('Picking a title and tags...');
+        try {
+          const m = await autoMeta(r.text);
+          if (!r.title) r.title = m.title;
+          if (!(r.tags || []).length) r.tags = m.tags;
+          if (!r.mood) r.mood = m.mood;
+        } catch { /* save anyway; the title falls back to the first few words */ }
+      }
+      await putPending(r);
       await saveRecordAsEntry(r);
       toast('Saved to your journal'); reviewId = null; location.hash = '#home';
     } catch (e) { setReviewStatus(e.message, true); }
@@ -1115,6 +1201,9 @@ function wire() {
   });
 
   $('#searchBox').addEventListener('input', renderJournal);
+  $('#saveEditBtn').addEventListener('click', saveEdit);
+  $('#cancelEditBtn').addEventListener('click', () => history.back());
+  $('#deleteEntryBtn').addEventListener('click', deleteEntry);
   $('#impPasteBtn').addEventListener('click', async () => {
     if (!configured()) { toast('Finish setup in More first'); return; }
     const text = $('#impText').value.trim(); if (!text) { toast('Paste some text first'); return; }
