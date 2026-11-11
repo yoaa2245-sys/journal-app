@@ -240,11 +240,21 @@ function extFor(type, name) {
   return 'm4a';
 }
 // Retry politely when a free tier says "slow down".
-async function fetchRetry(url, opts, tries = 4) {
+// Free tiers cap how much text goes through per minute. When we hit the cap,
+// wait as long as the service asks (its error says "try again in 7.9s") and retry.
+async function fetchRetry(url, opts, tries = 8) {
   for (let i = 0; ; i++) {
     const res = await fetch(url, opts);
     if (res.status !== 429 || i >= tries - 1) return res;
-    const wait = Math.min(60, Number(res.headers.get('retry-after')) || 2 ** (i + 2));
+    let wait = Number(res.headers.get('retry-after')) || 0;
+    if (!wait) {
+      try {
+        const m = (await res.clone().text()).match(/try again in (?:(\d+)m)?([\d.]+)(ms|s)/i);
+        if (m) wait = (Number(m[1] || 0) * 60) + (m[3] === 'ms' ? Number(m[2]) / 1000 : Number(m[2]));
+      } catch {}
+    }
+    wait = Math.min(90, (wait || 2 ** (i + 2)) + 1);
+    if (i === 0) toast(`Free limit reached. Waiting ${Math.ceil(wait)}s and trying again...`, 4000);
     await new Promise((r) => setTimeout(r, wait * 1000));
   }
 }
