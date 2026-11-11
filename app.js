@@ -10,7 +10,7 @@ const HABITS_PATH = 'journal/habits.json';
 const ENTRY_RE = /^journal\/\d{4}\/\d{2}\/(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})(\d{2})(?:-([^/]*))?\.md$/;
 const AUTO_LOCK_MS = 5 * 60 * 1000;
 const DEF = {
-  sttModel: 'whisper-large-v3', language: 'en', cleanup: 'groq',
+  sttModel: 'whisper-large-v3', language: 'en', cleanup: 'nightly',
   groqChatModel: 'openai/gpt-oss-120b', claudeModel: 'claude-opus-5-5', branch: 'main',
 };
 const SETTING_KEYS = ['groqKey', 'sttModel', 'language', 'cleanup', 'groqChatModel', 'anthropicKey', 'claudeModel', 'repo', 'branch', 'ghToken'];
@@ -157,12 +157,13 @@ function metaFrom(md) {
     words: p.body.split(/\s+/).filter(Boolean).length,
   };
 }
-function buildEntry({ date, title, text, raw, mood, tags, duration, source }) {
+function buildEntry({ date, title, text, raw, mood, tags, duration, source, pending, autotitle }) {
   const words = text.split(/\s+/).filter(Boolean).length;
   const lines = ['---', `date: ${localISO(date)}`, `title: ${JSON.stringify(title)}`];
   if (mood) lines.push(`mood: ${mood}`);
   if (tags && tags.length) lines.push(`tags: ${JSON.stringify(tags)}`);
   if (duration) lines.push(`duration: ${JSON.stringify(fmtDur(duration))}`);
+  if (pending) { lines.push('cleanup: pending'); if (autotitle) lines.push('autotitle: true'); }
   lines.push(`words: ${words}`, `source: ${source || 'voice'}`, '---', '', `# ${title}`, '', text.trim(), '');
   if (raw && raw.trim() !== text.trim()) {
     lines.push('<details>', '<summary>Raw transcript</summary>', '', raw.trim(), '', '</details>', '');
@@ -310,8 +311,11 @@ function normClean(j, raw) {
   };
 }
 // Sends one prompt to the chosen cleanup provider and returns the reply text.
+// 'nightly' leaves cleanup to the scheduled Claude Code run; "Clean now" borrows Groq.
+let forceProvider = null;
+const provider = () => forceProvider || cfg('cleanup');
 async function askAI(system, user) {
-  if (cfg('cleanup') === 'claude') {
+  if (provider() === 'claude') {
     if (!cfg('anthropicKey')) throw new Error('Add an Anthropic API key in More, or switch cleanup to Groq.');
     const model = cfg('claudeModel');
     const headers = {
@@ -350,7 +354,11 @@ function keptEnough(orig, cleaned) {
   for (const w of contentWords(cleaned)) left.set(w, (left.get(w) || 0) + 1);
   const want = contentWords(orig); let hit = 0;
   for (const w of want) { const n = left.get(w) || 0; if (n) { hit++; left.set(w, n - 1); } }
-  return !want.length || hit / want.length >= 0.88;
+  // Allowances: a few words for dropped repeats ("it was it was"), plus one per word
+  // of a vocabulary name the cleanup spelled correctly (it replaces a misheard word).
+  const origSet = new Set(contentWords(orig));
+  const vocabFixes = contentWords(vocabList().join(' ')).filter((w) => !origSet.has(w) && contentWords(cleaned).includes(w)).length;
+  return want.length - hit <= Math.floor(want.length * 0.12) + 3 + vocabFixes;
 }
 function splitChunks(text, max = 220) {
   const out = []; let cur = [];
@@ -378,7 +386,8 @@ async function cleanChunk(piece, typed) {
   return { text: piece.trim(), kept: false };
 }
 async function cleanup(raw, typed) {
-  if (cfg('cleanup') === 'none' || !raw.trim()) return { title: defaultTitle(raw), text: raw, mood: null, tags: [] };
+  if (provider() === 'nightly' && raw.trim()) return { title: defaultTitle(raw), text: raw, mood: null, tags: [], pending: true };
+  if (provider() === 'none' || !raw.trim()) return { title: defaultTitle(raw), text: raw, mood: null, tags: [] };
   const parts = []; let untouched = 0;
   for (const piece of splitChunks(raw)) {
     const r = await cleanChunk(piece, typed);
@@ -413,13 +422,17 @@ async function processRecord(id) {
       rec.error = ''; await putPending(rec);
     }
     if (!rec.cleaned) {
-      setReviewStatus(cfg('cleanup') === 'none' ? '' : 'Cleaning up...');
+      forceProvider = rec.cleanNow && ['nightly', 'none'].includes(cfg('cleanup')) ? 'groq' : null;
+      setReviewStatus(['nightly', 'none'].includes(provider()) ? '' : 'Cleaning up...');
       const c = await cleanup(rec.raw || '', rec.source !== 'voice' && rec.source !== 'import-audio');
-      Object.assign(rec, c, { cleaned: true, error: '' });
+      forceProvider = null;
+      Object.assign(rec, c, { cleaned: true, error: '', pending: !!c.pending, cleanNow: false, note: '' });
+      if (c.pending) rec.note = 'Claude will clean this up overnight and add a title, tags and mood. Tap "Clean now" if you want it done right away.';
       if (c.untouched) rec.note = `${c.untouched} part${c.untouched === 1 ? ' was' : 's were'} left exactly as you said ${c.untouched === 1 ? 'it' : 'them'}, because the cleanup tried to cut words.`;
       await putPending(rec);
     }
   } catch (e) {
+    forceProvider = null;
     rec.error = e.message; await putPending(rec);
     throw e;
   }
@@ -431,10 +444,11 @@ function setReviewStatus(msg, isErr) {
 
 async function saveRecordAsEntry(rec) {
   const date = new Date(rec.createdAt);
+  const auto = !(rec.title || '').trim() || (rec.pending && rec.title === defaultTitle(rec.raw || rec.text));
   const title = (rec.title || '').trim() || defaultTitle(rec.text || rec.raw);
   const text = (rec.text || rec.raw || '').trim();
   if (!text) throw new Error('Nothing to save: the entry is empty.');
-  const md = buildEntry({ date, title, text, raw: rec.raw, mood: rec.mood, tags: rec.tags, duration: rec.duration, source: rec.source });
+  const md = buildEntry({ date, title, text, raw: rec.raw, mood: rec.mood, tags: rec.tags, duration: rec.duration, source: rec.source, pending: rec.pending, autotitle: auto });
   const path = entryPath(date, title);
   const sha = await putFile(path, md, `Journal: ${title}`);
   vault.meta[sha] = metaFrom(md); saveVaultSoon();
@@ -866,6 +880,7 @@ function rebuildEntry(md, { title, text, mood, tags }) {
   if (mood) lines.push(`mood: ${mood}`);
   if (tags.length) lines.push(`tags: ${JSON.stringify(tags)}`);
   const rest = { ...p.fm, words: text.split(/\s+/).filter(Boolean).length };
+  if (title !== p.title) delete rest.autotitle;
   for (const [k, v] of Object.entries(rest)) {
     if (['date', 'title', 'mood', 'tags'].includes(k)) continue;
     lines.push(`${k}: ${typeof v === 'string' && /^[\w.-]+$/.test(v) ? v : JSON.stringify(v)}`);
@@ -915,7 +930,7 @@ function fillReview(r) {
   $('#reviewTags').value = (r.tags || []).join(', ');
   $('#reviewRaw').textContent = r.raw || '(not transcribed yet)';
   $('#reviewRawWrap').hidden = r.source === 'typed' && !r.raw;
-  $('#recleanBtn').textContent = r.source === 'typed' ? 'Tidy up' : 'Re-clean';
+  $('#recleanBtn').textContent = r.source === 'typed' ? 'Tidy up' : r.pending ? 'Clean now' : 'Re-clean';
   reviewMood = r.mood || null; renderMoodPick();
   const raw = (r.raw || '').length; const txt = (r.text || '').length;
   if (r.note) setReviewStatus(r.note);
@@ -929,7 +944,7 @@ async function openReview(id) {
   if (r.stage === 'recording') { r.stage = 'recorded'; await putPending(r); }
   if (r.source === 'typed' && r.cleaned) {
     $('#viewTitle').textContent = 'Write';
-    setReviewStatus('Write whatever you want. Drafts save on this device as you type. A title, tags and mood are picked for you when you save (anything you fill in yourself is kept). "Tidy up" also fixes typos.');
+    setReviewStatus(`Write whatever you want. Drafts save on this device as you type. ${cfg('cleanup') === 'nightly' ? 'Claude adds a title, tags and mood overnight' : 'A title, tags and mood are picked for you when you save'} (anything you fill in yourself is kept). "Tidy up" also fixes typos.`);
     if (!r.text) setTimeout(() => $('#reviewText').focus(), 50);
     return;
   }
@@ -1218,7 +1233,8 @@ function wire() {
     const btn = $('#saveEntryBtn'); btn.disabled = true; setReviewStatus('Saving...'); clearTimeout(draftTimer);
     try {
       const r = await reviewFormToRecord();
-      if (r.source === 'typed' && (r.text || '').trim() && cfg('cleanup') !== 'none' && (!r.title || !(r.tags || []).length || !r.mood)) {
+      if (r.source === 'typed' && cfg('cleanup') === 'nightly' && (!r.title || !(r.tags || []).length || !r.mood)) r.pending = true;
+      else if (r.source === 'typed' && (r.text || '').trim() && cfg('cleanup') !== 'none' && (!r.title || !(r.tags || []).length || !r.mood)) {
         setReviewStatus('Picking a title and tags...');
         try {
           const m = await autoMeta(r.text);
@@ -1241,7 +1257,7 @@ function wire() {
       r.raw = r.text;
     }
     if (!r.raw) return;
-    r.cleaned = false; await putPending(r); openReview(reviewId);
+    r.cleaned = false; r.cleanNow = true; await putPending(r); openReview(reviewId);
   });
   const saveDraftSoon = () => {
     clearTimeout(draftTimer);
